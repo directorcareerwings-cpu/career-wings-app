@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const { Client, LocalAuth } = require('whatsapp-web.js');
+const QRCode = require('qrcode');
 const fs = require('fs');
 
 let win;
@@ -14,10 +15,7 @@ function sendState(extra = {}) {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 980,
-    minHeight: 650,
+    width: 1200, height: 800, minWidth: 980, minHeight: 650,
     backgroundColor: '#eef8ff',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }
   });
@@ -27,20 +25,17 @@ function createWindow() {
 function createClient() {
   client = new Client({
     authStrategy: new LocalAuth({ clientId: 'career-wings' }),
-    puppeteer: {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+  });
+  client.on('qr', async qr => {
+    try {
+      const dataUrl = await QRCode.toDataURL(qr, { width: 260, margin: 2 });
+      sendState({ status: 'qr', qr: dataUrl });
+    } catch (e) {
+      sendState({ status: 'qr', error: 'QR generation failed: ' + e.message });
     }
   });
-
-  client.on('qr', async qr => {
-    sendState({ status: 'qr', qr });
-  });
-
-  client.on('ready', () => {
-    sendState({ status: 'connected', qr: null });
-  });
-
+  client.on('ready', () => sendState({ status: 'connected', qr: null, error: '' }));
   client.on('authenticated', () => sendState({ status: 'authenticated' }));
   client.on('auth_failure', msg => sendState({ status: 'auth_failure', error: String(msg) }));
   client.on('disconnected', reason => sendState({ status: 'disconnected', error: String(reason), running: false }));
@@ -48,7 +43,7 @@ function createClient() {
 
 ipcMain.handle('connect', async () => {
   if (!client) createClient();
-  if (state.status === 'connected' || state.status === 'authenticated' || state.status === 'qr') return state;
+  if (['connected','authenticated','qr'].includes(state.status)) return state;
   await client.initialize();
   return state;
 });
@@ -70,35 +65,28 @@ ipcMain.handle('send-campaign', async (_event, payload) => {
   const delayMs = Math.max(5000, Math.min(60000, Number(payload?.delayMs || 8000)));
   if (!message) throw new Error('Message is required.');
   const eligible = contacts.filter(c => c && c.optedIn && String(c.phone || '').trim());
-
   sendState({ sent: 0, failed: 0, total: eligible.length, running: true });
   for (const contact of eligible) {
     if (!state.running) break;
     try {
-      const digits = String(contact.phone).replace(/\\D/g, '');
+      const digits = String(contact.phone).replace(/\D/g, '');
       if (digits.length < 8) throw new Error('Invalid phone number');
       const chatId = digits + '@c.us';
       const exists = await client.isRegisteredUser(chatId);
       if (!exists) throw new Error('Number is not registered on WhatsApp');
-      const text = message.replace(/{{\\s*name\\s*}}/gi, String(contact.name || 'there'));
+      const text = message.replace(/{{\s*name\s*}}/gi, String(contact.name || 'there'));
       await client.sendMessage(chatId, text);
       sendState({ sent: state.sent + 1 });
     } catch (error) {
       sendState({ failed: state.failed + 1, lastError: String(error.message || error) });
     }
-    if (state.running && contact !== eligible[eligible.length - 1]) {
-      await new Promise(resolve => setTimeout(resolve, delayMs));
-    }
+    if (state.running && contact !== eligible[eligible.length - 1]) await new Promise(resolve => setTimeout(resolve, delayMs));
   }
   sendState({ running: false });
   return state;
 });
 
-ipcMain.handle('stop-campaign', async () => {
-  sendState({ running: false });
-  return state;
-});
-
+ipcMain.handle('stop-campaign', async () => { sendState({ running: false }); return state; });
 ipcMain.handle('import-csv', async () => {
   const result = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'CSV', extensions: ['csv'] }] });
   if (result.canceled || !result.filePaths[0]) return null;
