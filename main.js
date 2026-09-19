@@ -46,6 +46,20 @@ function clearStaleChromiumLocks() {
   }
 }
 
+function normalizePhone(value) {
+  let s = String(value ?? '').trim().replace(/^['"]|['"]$/g, '');
+  if (!s) return '';
+  if (/^[+]?\d+(?:\.\d+)?e[+]?\d+$/i.test(s)) {
+    const n = Number(s);
+    if (Number.isFinite(n)) s = Math.trunc(n).toString();
+  }
+  let digits = s.replace(/\D/g, '');
+  if (digits.startsWith('0091')) digits = digits.slice(2);
+  if (digits.startsWith('0') && digits.length === 11) digits = digits.slice(1);
+  if (digits.length === 10) digits = '91' + digits;
+  return digits;
+}
+
 function findBrowser() {
   const candidates = [
     path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
@@ -177,8 +191,10 @@ ipcMain.handle('send-campaign', async (_event, payload) => {
   for (const contact of eligible) {
     if (!state.running) break;
     try {
-      const digits = String(contact.phone).replace(/\D/g, '');
-      if (digits.length < 8) throw new Error('Invalid phone number');
+      const digits = normalizePhone(contact.phone);
+      if (digits.length !== 12 || !digits.startsWith('91')) {
+        throw new Error('Invalid Indian mobile number. Use 10 digits; +91 is added automatically.');
+      }
 
       const chatId = digits + '@c.us';
       const exists = await client.isRegisteredUser(chatId);
