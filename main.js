@@ -13,6 +13,18 @@ function sendState(extra = {}) {
   if (win && !win.isDestroyed()) win.webContents.send('state', state);
 }
 
+function findBrowser() {
+  const candidates = [
+    path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+  ];
+  return candidates.find(p => p && fs.existsSync(p)) || null;
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1200, height: 800, minWidth: 980, minHeight: 650,
@@ -23,18 +35,30 @@ function createWindow() {
 }
 
 function createClient() {
+  const browser = findBrowser();
+  const puppeteerOptions = {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  };
+  if (browser) puppeteerOptions.executablePath = browser;
+
   client = new Client({
-    authStrategy: new LocalAuth({ clientId: 'career-wings' }),
-    puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+    authStrategy: new LocalAuth({
+      clientId: 'career-wings',
+      dataPath: path.join(app.getPath('userData'), 'whatsapp-session')
+    }),
+    puppeteer: puppeteerOptions
   });
+
   client.on('qr', async qr => {
     try {
       const dataUrl = await QRCode.toDataURL(qr, { width: 260, margin: 2 });
-      sendState({ status: 'qr', qr: dataUrl });
+      sendState({ status: 'qr', qr: dataUrl, browserPath: browser || 'Puppeteer managed browser' });
     } catch (e) {
       sendState({ status: 'qr', error: 'QR generation failed: ' + e.message });
     }
   });
+
   client.on('ready', () => sendState({ status: 'connected', qr: null, error: '' }));
   client.on('authenticated', () => sendState({ status: 'authenticated' }));
   client.on('auth_failure', msg => sendState({ status: 'auth_failure', error: String(msg) }));
@@ -44,8 +68,19 @@ function createClient() {
 ipcMain.handle('connect', async () => {
   if (!client) createClient();
   if (['connected','authenticated','qr'].includes(state.status)) return state;
-  await client.initialize();
-  return state;
+  try {
+    await client.initialize();
+    return state;
+  } catch (e) {
+    const browser = findBrowser();
+    const hint = browser
+      ? 'Detected browser: ' + browser
+      : 'Google Chrome or Microsoft Edge was not detected. Please install/update one and try again.';
+    sendState({ status: 'disconnected', error: String(e.message || e) + ' ' + hint, running: false });
+    try { if (client) await client.destroy(); } catch {}
+    client = null;
+    throw new Error(String(e.message || e) + ' ' + hint);
+  }
 });
 
 ipcMain.handle('disconnect', async () => {
@@ -66,6 +101,7 @@ ipcMain.handle('send-campaign', async (_event, payload) => {
   if (!message) throw new Error('Message is required.');
   const eligible = contacts.filter(c => c && c.optedIn && String(c.phone || '').trim());
   sendState({ sent: 0, failed: 0, total: eligible.length, running: true });
+
   for (const contact of eligible) {
     if (!state.running) break;
     try {
@@ -80,21 +116,36 @@ ipcMain.handle('send-campaign', async (_event, payload) => {
     } catch (error) {
       sendState({ failed: state.failed + 1, lastError: String(error.message || error) });
     }
-    if (state.running && contact !== eligible[eligible.length - 1]) await new Promise(resolve => setTimeout(resolve, delayMs));
+    if (state.running && contact !== eligible[eligible.length - 1]) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
   }
+
   sendState({ running: false });
   return state;
 });
 
-ipcMain.handle('stop-campaign', async () => { sendState({ running: false }); return state; });
+ipcMain.handle('stop-campaign', async () => {
+  sendState({ running: false });
+  return state;
+});
+
 ipcMain.handle('import-csv', async () => {
-  const result = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'CSV', extensions: ['csv'] }] });
+  const result = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: [{ name: 'CSV', extensions: ['csv'] }]
+  });
   if (result.canceled || !result.filePaths[0]) return null;
   return fs.readFileSync(result.filePaths[0], 'utf8');
 });
 
 app.whenReady().then(() => {
   createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
 });
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
