@@ -8,9 +8,42 @@ let win;
 let client;
 let state = { status: 'disconnected', qr: null, sent: 0, failed: 0, total: 0, running: false };
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+}
+
 function sendState(extra = {}) {
   state = { ...state, ...extra };
   if (win && !win.isDestroyed()) win.webContents.send('state', state);
+}
+
+function sessionRoot() {
+  return path.join(app.getPath('userData'), 'whatsapp-session');
+}
+
+function sessionProfile() {
+  return path.join(sessionRoot(), 'session-career-wings');
+}
+
+function clearStaleChromiumLocks() {
+  const profile = sessionProfile();
+  const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+  for (const file of lockFiles) {
+    const target = path.join(profile, file);
+    try {
+      if (fs.existsSync(target)) fs.rmSync(target, { force: true });
+    } catch {
+      // Active Chromium may hold the lock. In that case initialization will report the issue.
+    }
+  }
 }
 
 function findBrowser() {
@@ -27,25 +60,41 @@ function findBrowser() {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1200, height: 800, minWidth: 980, minHeight: 650,
+    width: 1200,
+    height: 800,
+    minWidth: 980,
+    minHeight: 650,
     backgroundColor: '#eef8ff',
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
 function createClient() {
+  clearStaleChromiumLocks();
   const browser = findBrowser();
   const puppeteerOptions = {
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-default-browser-check'
+    ]
   };
+
   if (browser) puppeteerOptions.executablePath = browser;
 
   client = new Client({
     authStrategy: new LocalAuth({
       clientId: 'career-wings',
-      dataPath: path.join(app.getPath('userData'), 'whatsapp-session')
+      dataPath: sessionRoot()
     }),
     puppeteer: puppeteerOptions
   });
@@ -53,33 +102,55 @@ function createClient() {
   client.on('qr', async qr => {
     try {
       const dataUrl = await QRCode.toDataURL(qr, { width: 260, margin: 2 });
-      sendState({ status: 'qr', qr: dataUrl, browserPath: browser || 'Puppeteer managed browser' });
+      sendState({
+        status: 'qr',
+        qr: dataUrl,
+        browserPath: browser || 'Puppeteer managed browser',
+        error: ''
+      });
     } catch (e) {
       sendState({ status: 'qr', error: 'QR generation failed: ' + e.message });
     }
   });
 
   client.on('ready', () => sendState({ status: 'connected', qr: null, error: '' }));
-  client.on('authenticated', () => sendState({ status: 'authenticated' }));
+  client.on('authenticated', () => sendState({ status: 'authenticated', error: '' }));
   client.on('auth_failure', msg => sendState({ status: 'auth_failure', error: String(msg) }));
-  client.on('disconnected', reason => sendState({ status: 'disconnected', error: String(reason), running: false }));
+
+  client.on('disconnected', async reason => {
+    sendState({ status: 'disconnected', error: String(reason), running: false });
+    try { await client.destroy(); } catch {}
+    client = null;
+  });
 }
 
 ipcMain.handle('connect', async () => {
-  if (!client) createClient();
-  if (['connected','authenticated','qr'].includes(state.status)) return state;
+  if (!gotSingleInstanceLock) throw new Error('Another Career Wings WhatsApp Sender instance is already running.');
+  if (state.status === 'connected' || state.status === 'authenticated' || state.status === 'qr') return state;
+
+  if (client) {
+    try { await client.destroy(); } catch {}
+    client = null;
+  }
+
+  createClient();
+
   try {
     await client.initialize();
     return state;
   } catch (e) {
     const browser = findBrowser();
-    const hint = browser
-      ? 'Detected browser: ' + browser
-      : 'Google Chrome or Microsoft Edge was not detected. Please install/update one and try again.';
-    sendState({ status: 'disconnected', error: String(e.message || e) + ' ' + hint, running: false });
+    const profile = sessionProfile();
+    const message = String(e.message || e);
+    const hint = message.includes('browser is already running')
+      ? 'WhatsApp profile is still locked. Close other Career Wings WhatsApp Sender windows and Chrome/Edge, then press Connect again.'
+      : browser
+        ? 'Detected browser: ' + browser
+        : 'Google Chrome or Microsoft Edge was not detected. Please install/update one and try again.';
     try { if (client) await client.destroy(); } catch {}
     client = null;
-    throw new Error(String(e.message || e) + ' ' + hint);
+    sendState({ status: 'disconnected', qr: null, error: message + ' ' + hint, running: false, sessionProfile: profile });
+    throw new Error(message + ' ' + hint);
   }
 });
 
@@ -89,7 +160,7 @@ ipcMain.handle('disconnect', async () => {
     try { await client.destroy(); } catch {}
     client = null;
   }
-  sendState({ status: 'disconnected', qr: null, running: false });
+  sendState({ status: 'disconnected', qr: null, running: false, error: '' });
   return state;
 });
 
@@ -99,6 +170,7 @@ ipcMain.handle('send-campaign', async (_event, payload) => {
   const message = String(payload?.message || '').trim();
   const delayMs = Math.max(5000, Math.min(60000, Number(payload?.delayMs || 8000)));
   if (!message) throw new Error('Message is required.');
+
   const eligible = contacts.filter(c => c && c.optedIn && String(c.phone || '').trim());
   sendState({ sent: 0, failed: 0, total: eligible.length, running: true });
 
@@ -107,15 +179,18 @@ ipcMain.handle('send-campaign', async (_event, payload) => {
     try {
       const digits = String(contact.phone).replace(/\D/g, '');
       if (digits.length < 8) throw new Error('Invalid phone number');
+
       const chatId = digits + '@c.us';
       const exists = await client.isRegisteredUser(chatId);
       if (!exists) throw new Error('Number is not registered on WhatsApp');
+
       const text = message.replace(/{{\s*name\s*}}/gi, String(contact.name || 'there'));
       await client.sendMessage(chatId, text);
       sendState({ sent: state.sent + 1 });
     } catch (error) {
       sendState({ failed: state.failed + 1, lastError: String(error.message || error) });
     }
+
     if (state.running && contact !== eligible[eligible.length - 1]) {
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
@@ -139,13 +214,14 @@ ipcMain.handle('import-csv', async () => {
   return fs.readFileSync(result.filePaths[0], 'utf8');
 });
 
-app.whenReady().then(() => {
-  createWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+if (gotSingleInstanceLock) {
+  app.whenReady().then(() => {
+    createWindow();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+}
