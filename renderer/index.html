@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Career Wings WhatsApp Sender</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div class="app">
+  <header><div class="brand"><div class="logo">CW</div><div><b>Career Wings</b><span>WhatsApp Bulk Sender</span></div></div><div id="status" class="status">Not Connected</div></header>
+  <main>
+    <section class="card connect"><div><div class="eyebrow">WHATSAPP CONNECTION</div><h1>Connect your existing WhatsApp</h1><p>Scan the QR with WhatsApp → Linked Devices. Your local session is retained by this Windows app.</p><div class="actions"><button id="connect">Connect / Show QR</button><button id="disconnect" class="secondary">Disconnect</button></div><div id="error" class="error"></div></div><div class="qr"><div id="qr"></div><small id="qrText">Click Connect / Show QR</small></div></section>
+    <section class="grid">
+      <div class="card"><div class="eyebrow">CONTACTS</div><div class="sectionHead"><h2>Recipients</h2><button id="import" class="secondary">Import CSV</button></div><p class="muted">CSV columns: name,phone,opted_in</p><div class="stats"><div><span>Total</span><b id="total">0</b></div><div><span>Opted in</span><b id="eligible">0</b></div><div><span>Excluded</span><b id="excluded">0</b></div></div><div id="contacts" class="contacts"></div></div>
+      <div class="card"><div class="eyebrow">CAMPAIGN</div><h2>Send message</h2><label>Message</label><textarea id="message">Hello {{name}}, this is Career Wings. We have an opportunity that may match your profile.</textarea><label>Delay between messages (seconds)</label><input id="delay" type="number" min="5" max="60" value="8"><div class="sendStats"><span>Sent <b id="sent">0</b></span><span>Failed <b id="failed">0</b></span><span>Total <b id="campaignTotal">0</b></span></div><div class="actions"><button id="send">Start Campaign</button><button id="stop" class="secondary">Stop</button></div><small class="notice">Use only contacts who have opted in to receive your messages. Sending limits and WhatsApp policies still apply.</small></div>
+    </section>
+  </main>
+</div><script src="app.js"></script>
+</body></html>
